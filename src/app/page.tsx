@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -10,6 +10,7 @@ import { Progress } from '@/components/ui/progress'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Checkbox } from '@/components/ui/checkbox'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useToast } from '@/hooks/use-toast'
 import { 
   Users, 
   Grid3X3, 
@@ -25,7 +26,12 @@ import {
   Check,
   RotateCcw,
   Eye,
-  GripVertical
+  GripVertical,
+  Download,
+  FolderOpen,
+  Save,
+  FileText,
+  Image as ImageIcon,
 } from 'lucide-react'
 
 import {
@@ -45,14 +51,52 @@ interface AppState {
   currentStudentIndex: number
 }
 
-const positionColors = {
-  front: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-700',
-  middle: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-700',
-  back: 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-900/30 dark:text-sky-400 dark:border-sky-700',
-  any: 'bg-gray-100 text-gray-800 border-gray-300 dark:bg-gray-800/30 dark:text-gray-400 dark:border-gray-600',
+interface SavedConfiguration {
+  id: string
+  name: string
+  savedAt: string
+  state: AppState
 }
 
+const positionColors = {
+  alone: 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-700',
+}
+
+const STORAGE_KEY = 'seatfinder.saved-configurations.v1'
+
+const cloneSerializable = <T,>(value: T): T => JSON.parse(JSON.stringify(value))
+
+const normalizeState = (state: AppState): AppState => {
+  const students = Array.isArray(state.students) ? state.students : []
+  const seats = Array.isArray(state.seats) ? state.seats : []
+
+  return {
+    step: state.step ?? 'setup',
+    numStudents: Number.isFinite(state.numStudents) ? state.numStudents : students.length || 1,
+    students,
+    seats,
+    currentStudentIndex: students.length
+      ? Math.max(0, Math.min(state.currentStudentIndex ?? 0, students.length - 1))
+      : 0,
+  }
+}
+
+const csvEscape = (value: string | number | boolean | null | undefined) =>
+  `"${String(value ?? '').replaceAll('"', '""')}"`
+
+const svgEscape = (value: string | number | boolean | null | undefined) =>
+  String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
+
+const makeFileName = (base: string, extension: string) =>
+  `${base}-${new Date().toISOString().slice(0, 10)}.${extension}`
+
 export default function ClassroomSeatArranger() {
+  const { toast } = useToast()
   const [state, setState] = useState<AppState>({
     step: 'setup',
     numStudents: 20,
@@ -60,8 +104,47 @@ export default function ClassroomSeatArranger() {
     seats: [],
     currentStudentIndex: 0
   })
-  
+  const [savedConfigurations, setSavedConfigurations] = useState<SavedConfiguration[]>([])
+  const [configurationName, setConfigurationName] = useState('Classroom setup')
+  const [selectedConfigurationId, setSelectedConfigurationId] = useState<string>('')
   const [draggedSeatId, setDraggedSeatId] = useState<string | null>(null)
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY)
+      if (!raw) return
+
+      const parsed = JSON.parse(raw) as SavedConfiguration[]
+      if (Array.isArray(parsed)) {
+        setSavedConfigurations(
+          parsed.map((entry) => ({
+            ...entry,
+            state: normalizeState(entry.state),
+          })),
+        )
+      }
+    } catch {
+      toast({
+        variant: 'destructive',
+        title: 'Saved configurations could not be loaded',
+        description: 'The browser storage copy was unreadable, so the app started fresh.',
+      })
+    }
+  }, [toast])
+
+  const persistSavedConfigurations = (nextConfigurations: SavedConfiguration[]) => {
+    setSavedConfigurations(nextConfigurations)
+
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextConfigurations))
+    } catch {
+      toast({
+        variant: 'destructive',
+        title: 'Could not save configurations',
+        description: 'The browser storage quota or permission settings blocked the write.',
+      })
+    }
+  }
   
   // Step navigation
   const goToStep = (step: AppState['step']) => {
@@ -78,6 +161,300 @@ export default function ClassroomSeatArranger() {
     const students = generateDefaultStudents(state.numStudents)
     const seats = generateDefaultSeats(state.numStudents)
     setState(prev => ({ ...prev, students, seats, step: 'layout', currentStudentIndex: 0 }))
+    toast({
+      title: 'Classroom created',
+      description: `${state.numStudents} student profiles and matching seats are ready.`,
+    })
+  }
+
+  const loadTestData = (scenario: 'friends' | 'conflict' | 'mixed') => {
+    let students: Student[] = []
+    let numStudents = 12
+
+    if (scenario === 'friends') {
+      // Scenario: Several mutual friend pairs
+      students = generateDefaultStudents(numStudents)
+      students[0].name = 'Alice'; students[0].preferences.wantToSitWith = [2]
+      students[1].name = 'Bob';   students[1].preferences.wantToSitWith = [1]  // Mutual with Alice
+      
+      students[2].name = 'Charlie'; students[2].preferences.wantToSitWith = [4]
+      students[3].name = 'Diana';   students[3].preferences.wantToSitWith = [3]  // Mutual with Charlie
+      
+      students[4].name = 'Eve'; students[4].preferences.wantToSitWith = [6]
+      students[5].name = 'Frank'; students[5].preferences.wantToSitWith = [5]  // Mutual with Eve
+      
+      students[6].name = 'Grace'
+      students[7].name = 'Henry'
+    } else if (scenario === 'conflict') {
+      // Scenario: One-way wants + conflicts + prefer alone
+      students = generateDefaultStudents(numStudents)
+      students[0].name = 'Alice'; students[0].preferences.wantToSitWith = [2]  // Wants Bob
+      students[1].name = 'Bob';   students[1].preferences.notWantToSitWith = [1]  // Does NOT want Alice back
+      
+      students[2].name = 'Charlie'; students[2].preferences.wantToSitWith = [4]  // Wants Diana
+      students[3].name = 'Diana';   students[3].preferences.preferAlone = true  // Prefers alone! (blocks Charlie)
+      
+      students[4].name = 'Eve'; students[4].preferences.wantToSitWith = [6]
+      students[5].name = 'Frank'; students[5].preferences.wantToSitWith = [5]  // Mutual with Eve ✅
+      
+      students[6].name = 'Grace'; students[6].preferences.notWantToSitWith = [8]
+      students[7].name = 'Henry'; students[7].preferences.wantToSitWith = [7]  // Wants Grace (one-way)
+      
+      students[8].name = 'Ivy'; students[8].preferences.preferAlone = true
+      students[9].name = 'Jack'
+      students[10].name = 'Kate'
+      students[11].name = 'Liam'
+    } else if (scenario === 'mixed') {
+      // Scenario: Mix of everything
+      students = generateDefaultStudents(16)
+      students[0].name = 'Alice'; students[0].preferences.wantToSitWith = [2]
+      students[1].name = 'Bob';   students[1].preferences.wantToSitWith = [1]  // Mutual ✅
+      
+      students[2].name = 'Charlie'; students[2].preferences.wantToSitWith = [4]
+      students[3].name = 'Diana';   students[3].preferences.wantToSitWith = [3]  // Mutual ✅
+      
+      students[4].name = 'Eve'; students[4].preferences.wantToSitWith = [6]  // One-way (Frank doesn't care)
+      students[5].name = 'Frank'
+
+      students[6].name = 'Grace'; students[6].preferences.preferAlone = true
+      students[7].name = 'Henry'; students[7].preferences.preferAlone = true
+      
+      students[8].name = 'Ivy';    students[8].preferences.wantToSitWith = [10]
+      students[9].name = 'Jack';   students[9].preferences.notWantToSitWith = [9]  // Blocks Ivy
+      
+      students[10].name = 'Kate'
+      students[11].name = 'Liam'
+      students[12].name = 'Mia'
+      students[13].name = 'Noah'
+      students[14].name = 'Olivia'
+      students[15].name = 'Paul'
+    }
+
+    const seats = generateDefaultSeats(numStudents)
+    setState(prev => ({ ...prev, students, seats, step: 'layout', currentStudentIndex: 0 }))
+    
+    const scenarioNames = { friends: 'Friend Pairs', conflict: 'Conflicts', mixed: 'Mixed Scenario' }
+    toast({
+      title: `Test data loaded: ${scenarioNames[scenario]}`,
+      description: `${numStudents} students with ${scenario} preferences ready.`,
+    })
+  }
+
+  const saveCurrentConfiguration = () => {
+    const name = configurationName.trim() || `Classroom ${savedConfigurations.length + 1}`
+    const snapshot: SavedConfiguration = {
+      id: globalThis.crypto?.randomUUID?.() ?? `config-${Date.now()}`,
+      name,
+      savedAt: new Date().toISOString(),
+      state: normalizeState(cloneSerializable(state)),
+    }
+
+    const nextConfigurations = [
+      snapshot,
+      ...savedConfigurations.filter((configuration) => configuration.name !== name),
+    ]
+
+    persistSavedConfigurations(nextConfigurations)
+    setSelectedConfigurationId(snapshot.id)
+
+    toast({
+      title: 'Configuration saved',
+      description: `"${name}" is ready to load later.`,
+    })
+  }
+
+  const loadConfiguration = (configurationId: string) => {
+    const configuration = savedConfigurations.find((entry) => entry.id === configurationId)
+    if (!configuration) {
+      toast({
+        variant: 'destructive',
+        title: 'Configuration not found',
+        description: 'Choose a saved classroom before trying to load it.',
+      })
+      return
+    }
+
+    setState(normalizeState(cloneSerializable(configuration.state)))
+    setSelectedConfigurationId(configuration.id)
+
+    toast({
+      title: 'Configuration loaded',
+      description: `"${configuration.name}" has been restored.`,
+    })
+  }
+
+  const deleteConfiguration = (configurationId: string) => {
+    const configuration = savedConfigurations.find((entry) => entry.id === configurationId)
+    if (!configuration) return
+
+    const nextConfigurations = savedConfigurations.filter((entry) => entry.id !== configurationId)
+    persistSavedConfigurations(nextConfigurations)
+
+    if (selectedConfigurationId === configurationId) {
+      setSelectedConfigurationId('')
+    }
+
+    toast({
+      title: 'Configuration deleted',
+      description: `"${configuration.name}" was removed from this browser.`,
+    })
+  }
+
+  const downloadTextFile = (filename: string, content: string, mimeType: string) => {
+    if (typeof window === 'undefined') return
+
+    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const exportConfigurationAsJson = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      classroom: normalizeState(cloneSerializable(state)),
+    }
+
+    downloadTextFile(
+      makeFileName('classroom-configuration', 'json'),
+      JSON.stringify(payload, null, 2),
+      'application/json',
+    )
+
+    toast({
+      title: 'JSON export started',
+      description: 'Your classroom configuration is downloading as a backup file.',
+    })
+  }
+
+  const exportArrangementAsCsv = () => {
+    if (state.students.length === 0 || state.seats.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'Nothing to export yet',
+        description: 'Create a classroom before exporting student assignments.',
+      })
+      return
+    }
+
+    const rows = [
+      [
+        'student_id',
+        'student_name',
+        'assigned_seat_id',
+        'row',
+        'col',
+        'prefer_alone',
+        'want_to_sit_with',
+        'not_want_to_sit_with',
+      ],
+      ...state.students.map((student) => {
+        const seat = state.seats.find((entry) => entry.id === student.assignedSeatId)
+
+        return [
+          student.id,
+          student.name,
+          student.assignedSeatId ?? '',
+          seat ? seat.row + 1 : '',
+          seat ? seat.col + 1 : '',
+          student.preferences.preferAlone,
+          student.preferences.wantToSitWith.join('|'),
+          student.preferences.notWantToSitWith.join('|'),
+        ]
+      }),
+    ]
+
+    const csvContent = rows
+      .map((row) => row.map((value) => csvEscape(value)).join(','))
+      .join('\n')
+
+    downloadTextFile(makeFileName('classroom-arrangement', 'csv'), csvContent, 'text/csv')
+
+    toast({
+      title: 'CSV export started',
+      description: 'The current arrangement is downloading as a spreadsheet file.',
+    })
+  }
+
+  const exportArrangementAsSvg = () => {
+    if (state.seats.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'Nothing to export yet',
+        description: 'Add seats before exporting a seat map image.',
+      })
+      return
+    }
+
+    const seatWidth = 180
+    const seatHeight = 120
+    const padding = 32
+    const headerHeight = 72
+    const maxRow = Math.max(...state.seats.map((seat) => seat.row), 0)
+    const maxCol = Math.max(...state.seats.map((seat) => seat.col), 0)
+    const width = padding * 2 + (maxCol + 1) * seatWidth
+    const height = padding * 2 + headerHeight + (maxRow + 1) * seatHeight
+    const studentBySeatId = new Map<string, Student>(
+      state.students
+        .filter((student): student is Student & { assignedSeatId: string } => Boolean(student.assignedSeatId))
+        .map((student) => [student.assignedSeatId, student]),
+    )
+
+    const cells = state.seats
+      .map((seat) => {
+        const student = studentBySeatId.get(seat.id)
+        const x = padding + seat.col * seatWidth
+        const y = padding + headerHeight + seat.row * seatHeight
+        const fill = student
+          ? student.preferences.preferAlone
+            ? '#8b5cf6'
+            : '#2563eb'
+          : '#ffffff'
+        const stroke = student ? '#1d4ed8' : '#94a3b8'
+        const seatLabel = `R${seat.row + 1} C${seat.col + 1}${seat.isDouble ? ' double' : ''}`
+        const name = student?.name ?? 'Empty'
+        const subtitle = student
+          ? student.preferences.preferAlone
+            ? 'Prefers alone'
+            : 'Assigned'
+          : 'No student assigned'
+
+        return `
+          <g>
+            <title>${svgEscape(name)} - ${svgEscape(seatLabel)}</title>
+            <rect x="${x}" y="${y}" rx="16" ry="16" width="${seatWidth - 16}" height="${seatHeight - 16}" fill="${fill}" stroke="${stroke}" stroke-width="2" stroke-dasharray="${student ? '0' : '8 6'}" />
+            <text x="${x + (seatWidth - 16) / 2}" y="${y + 34}" text-anchor="middle" font-size="18" font-weight="700" fill="${student ? '#ffffff' : '#0f172a'}">${svgEscape(name)}</text>
+            <text x="${x + (seatWidth - 16) / 2}" y="${y + 60}" text-anchor="middle" font-size="12" fill="${student ? 'rgba(255,255,255,0.85)' : '#475569'}">${svgEscape(subtitle)}</text>
+            <text x="${x + (seatWidth - 16) / 2}" y="${y + 86}" text-anchor="middle" font-size="11" fill="${student ? 'rgba(255,255,255,0.78)' : '#64748b'}">${svgEscape(seatLabel)}</text>
+          </g>
+        `
+      })
+      .join('\n')
+
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+        <defs>
+          <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#f8fafc" />
+            <stop offset="100%" stop-color="#e2e8f0" />
+          </linearGradient>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#bg)" />
+        <text x="${padding}" y="${padding + 18}" font-size="26" font-weight="700" fill="#0f172a">Classroom Seat Map</text>
+        <text x="${padding}" y="${padding + 42}" font-size="14" fill="#475569">Exported ${svgEscape(new Date().toLocaleString())}</text>
+        ${cells}
+      </svg>
+    `
+
+    downloadTextFile(makeFileName('classroom-seat-map', 'svg'), svg.trim(), 'image/svg+xml')
+
+    toast({
+      title: 'Image export started',
+      description: 'The current seat map is downloading as an SVG image.',
+    })
   }
 
   // Layout handlers
@@ -192,8 +569,8 @@ export default function ClassroomSeatArranger() {
   
   // Preference handlers
   const updateStudentPreference = (
-    studentId: number, 
-    field: 'position' | 'wantToSitWith' | 'notWantToSitWith' | 'preferAlone',
+    studentId: number,
+    field: 'wantToSitWith' | 'notWantToSitWith' | 'preferAlone',
     value: string | number[] | boolean
   ) => {
     setState(prev => ({
@@ -238,8 +615,21 @@ export default function ClassroomSeatArranger() {
   
   // Arrangement
   const runArrangement = () => {
+    if (state.students.length === 0 || state.seats.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'Create a classroom first',
+        description: 'We need both students and seats before the auto-arranger can run.',
+      })
+      return
+    }
+
     const arrangedStudents = arrangeSeats(state.students, state.seats)
     setState(prev => ({ ...prev, students: arrangedStudents, step: 'result' }))
+    toast({
+      title: 'Arrangement complete',
+      description: 'Students have been assigned based on the current preferences.',
+    })
   }
   
   const resetArrangement = () => {
@@ -252,6 +642,10 @@ export default function ClassroomSeatArranger() {
   
   // Calculate grid layout
   const { seatGrid } = useMemo(() => {
+    if (state.seats.length === 0) {
+      return { seatGrid: [] as (Seat | null)[][] }
+    }
+
     const maxRow = Math.max(...state.seats.map(s => s.row), 0)
     const maxCol = Math.max(...state.seats.map(s => s.col), 0)
     
@@ -270,6 +664,91 @@ export default function ClassroomSeatArranger() {
   
   const currentStudent = state.students[state.currentStudentIndex]
   const otherStudents = state.students.filter(s => s.id !== currentStudent?.id)
+  const progressValue = state.students.length > 0
+    ? ((state.currentStudentIndex + 1) / state.students.length) * 100
+    : 0
+
+  const renderWorkspaceControls = () => (
+    <Card className="mb-6 border-dashed">
+      <CardHeader className="pb-4">
+        <CardTitle className="flex items-center gap-2">
+          <FolderOpen className="h-5 w-5" />
+          Save, Load, Export
+        </CardTitle>
+        <CardDescription>
+          Keep a browser-local backup of the current classroom and export the arrangement when you’re ready to share it.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-[1.4fr_0.9fr_auto]">
+          <Input
+            value={configurationName}
+            onChange={(event) => setConfigurationName(event.target.value)}
+            placeholder="Configuration name"
+          />
+          <Select value={selectedConfigurationId} onValueChange={setSelectedConfigurationId}>
+            <SelectTrigger>
+              <SelectValue placeholder="Saved configurations" />
+            </SelectTrigger>
+            <SelectContent>
+              {savedConfigurations.length === 0 ? (
+                <SelectItem value="__empty__" disabled>
+                  No saved configurations yet
+                </SelectItem>
+              ) : (
+                savedConfigurations.map((configuration) => (
+                  <SelectItem key={configuration.id} value={configuration.id}>
+                    {configuration.name}
+                  </SelectItem>
+                ))
+              )}
+            </SelectContent>
+          </Select>
+          <Button onClick={saveCurrentConfiguration} variant="outline">
+            <Save className="h-4 w-4 mr-2" />
+            Save
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={() => loadConfiguration(selectedConfigurationId)}
+            disabled={!selectedConfigurationId || selectedConfigurationId === '__empty__'}
+            variant="outline"
+          >
+            <FolderOpen className="h-4 w-4 mr-2" />
+            Load
+          </Button>
+          <Button
+            onClick={() => deleteConfiguration(selectedConfigurationId)}
+            disabled={!selectedConfigurationId || selectedConfigurationId === '__empty__'}
+            variant="outline"
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
+          <div className="flex flex-wrap gap-2 ml-auto">
+            <Button onClick={exportConfigurationAsJson} variant="outline">
+              <FileText className="h-4 w-4 mr-2" />
+              JSON
+            </Button>
+            <Button onClick={exportArrangementAsCsv} variant="outline">
+              <Download className="h-4 w-4 mr-2" />
+              CSV
+            </Button>
+            <Button onClick={exportArrangementAsSvg} variant="outline">
+              <ImageIcon className="h-4 w-4 mr-2" />
+              SVG
+            </Button>
+          </div>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          Saved locally in this browser only. Exported files are a portable copy of the current classroom state.
+        </p>
+      </CardContent>
+    </Card>
+  )
   
   const renderProgressBar = () => {
     const steps = [
@@ -338,11 +817,29 @@ export default function ClassroomSeatArranger() {
           />
           <p className="text-sm text-muted-foreground">Recommended: 10-40 students for best results</p>
         </div>
-        
+
         <Button onClick={initializeClass} className="w-full" size="lg">
           Create Classroom
           <ChevronRight className="h-4 w-4 ml-2" />
         </Button>
+
+        <div className="pt-4 border-t space-y-3">
+          <p className="text-sm font-medium text-muted-foreground">Quick Test Scenarios</p>
+          <div className="grid grid-cols-1 gap-2">
+            <Button onClick={() => loadTestData('friends')} variant="outline" size="sm">
+              <Sparkles className="h-4 w-4 mr-2" />
+              Test: Mutual Friends (12 students, 3 pairs)
+            </Button>
+            <Button onClick={() => loadTestData('conflict')} variant="outline" size="sm">
+              <Sparkles className="h-4 w-4 mr-2" />
+              Test: Conflicts & One-Way (12 students)
+            </Button>
+            <Button onClick={() => loadTestData('mixed')} variant="outline" size="sm">
+              <Sparkles className="h-4 w-4 mr-2" />
+              Test: Mixed Everything (16 students)
+            </Button>
+          </div>
+        </div>
       </CardContent>
     </Card>
   )
@@ -373,14 +870,14 @@ export default function ClassroomSeatArranger() {
             </Button>
           </div>
           
-          <div className="border rounded-lg p-4 bg-muted/30 overflow-x-auto">
-            <div className="text-center mb-4 text-sm text-muted-foreground font-medium">
-              📝 FRONT OF CLASSROOM
+          <div className="border rounded-lg p-6 bg-muted/30 overflow-x-auto">
+            <div className="text-center mb-6 text-sm text-muted-foreground font-medium">
+              FRONT OF CLASSROOM
             </div>
-            
-            <div className="flex flex-col gap-2 items-center min-w-max">
+
+            <div className="flex flex-col gap-3 items-center min-w-max">
               {seatGrid.map((row, rowIndex) => (
-                <div key={rowIndex} className="flex gap-2">
+                <div key={rowIndex} className="flex gap-3">
                   {row.map((seat, colIndex) => {
                     if (!seat) {
                       return (
@@ -388,46 +885,46 @@ export default function ClassroomSeatArranger() {
                           key={`empty-${rowIndex}-${colIndex}`}
                           onDragOver={(e) => e.preventDefault()}
                           onDrop={() => handleDropAtPosition(rowIndex, colIndex)}
-                          className={`w-14 h-14 rounded-lg border-2 border-dashed flex items-center justify-center transition-all ${
+                          className={`w-20 h-20 rounded-lg border-2 border-dashed flex items-center justify-center transition-all ${
                             draggedSeatId ? 'border-primary/50 bg-primary/5 hover:border-primary hover:bg-primary/10' : 'border-transparent'
                           }`}
                         >
-                          {draggedSeatId && <div className="text-xs text-muted-foreground">+</div>}
+                          {draggedSeatId && <Plus className="h-6 w-6 text-primary/50" />}
                         </div>
                       )
                     }
-                    
+
                     const isBeingDragged = draggedSeatId === seat.id
                     const isDouble = seat.isDouble
-                    
+
                     return (
                       <div key={seat.id} className="relative group" onDragOver={(e) => e.preventDefault()} onDrop={() => handleDropAtPosition(seat.row, seat.col)}>
                         <button
                           onClick={(e) => { e.stopPropagation(); deleteSeat(seat.id) }}
-                          className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-red-600 shadow-sm"
+                          className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-red-600 shadow-sm"
                           title="Delete seat"
                         >
                           <Trash2 className="h-3 w-3" />
                         </button>
-                        
+
                         <div
                           draggable
                           onDragStart={() => handleDragStart(seat.id)}
                           onDragEnd={handleDragEnd}
                           onClick={() => toggleDoubleSeat(seat.id)}
-                          className={`w-14 h-14 rounded-lg flex flex-col items-center justify-center cursor-grab transition-all duration-200 select-none ${
+                          className={`w-20 h-20 rounded-lg flex flex-col items-center justify-center cursor-grab transition-all duration-200 select-none ${
                             isBeingDragged ? 'opacity-30 scale-95 cursor-grabbing' : 'hover:scale-105 cursor-grab active:cursor-grabbing'
-                          } ${isDouble ? 'bg-primary/20 border-2 border-primary shadow-md' : 'bg-card border border-border hover:border-primary/50'}`}
+                          } ${isDouble ? 'bg-primary/20 border-2 border-primary shadow-lg' : 'bg-card border-2 border-border hover:border-primary/50'}`}
                           title={`Row ${seat.row + 1}, Col ${seat.col + 1}${isDouble ? ' (Double Desk - click to unpair)' : ' (Click to pair)'}`}
                         >
-                          <GripVertical className="h-3 w-3 text-muted-foreground mb-1" />
+                          <GripVertical className="h-4 w-4 text-muted-foreground mb-1" />
                           {isDouble ? (
-                            <div className="flex gap-0.5">
-                              <div className="w-3 h-3 rounded-sm bg-primary/60" />
-                              <div className="w-3 h-3 rounded-sm bg-primary/60" />
+                            <div className="flex gap-1">
+                              <div className="w-4 h-4 rounded-sm bg-primary/60" />
+                              <div className="w-4 h-4 rounded-sm bg-primary/60" />
                             </div>
                           ) : (
-                            <div className="w-5 h-5 rounded-sm bg-muted-foreground/30" />
+                            <div className="w-6 h-6 rounded-sm bg-muted-foreground/30" />
                           )}
                         </div>
                       </div>
@@ -438,10 +935,11 @@ export default function ClassroomSeatArranger() {
             </div>
           </div>
           
-          <div className="flex gap-4 mt-4 text-sm text-muted-foreground flex-wrap">
-            <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-card border" /> Single Seat</div>
-            <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-primary/20 border-2 border-primary" /> Double Desk</div>
+          <div className="flex gap-6 mt-6 text-sm text-muted-foreground flex-wrap">
+            <div className="flex items-center gap-2"><div className="w-5 h-5 rounded bg-card border-2" /> Single Seat</div>
+            <div className="flex items-center gap-2"><div className="w-5 h-5 rounded bg-primary/20 border-2 border-primary" /> Double Desk</div>
             <div className="flex items-center gap-2"><GripVertical className="h-4 w-4" /> Drag to move</div>
+            <div className="flex items-center gap-2"><Trash2 className="h-4 w-4 text-red-500" /> Hover to delete</div>
           </div>
         </CardContent>
       </Card>
@@ -466,7 +964,7 @@ export default function ClassroomSeatArranger() {
               <span className="text-sm text-muted-foreground">Progress</span>
               <span className="text-sm font-medium">{state.currentStudentIndex + 1} of {state.students.length}</span>
             </div>
-            <Progress value={((state.currentStudentIndex + 1) / state.students.length) * 100} className="h-2" />
+            <Progress value={progressValue} className="h-2" />
           </div>
           
           {currentStudent && (
@@ -498,19 +996,6 @@ export default function ClassroomSeatArranger() {
                   </label>
                 </div>
                 
-                <div className="space-y-2">
-                  <Label>Position Preference</Label>
-                  <Select value={currentStudent.preferences.position} onValueChange={(value) => updateStudentPreference(currentStudent.id, 'position', value)}>
-                    <SelectTrigger><SelectValue placeholder="Select position" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="any">No Preference</SelectItem>
-                      <SelectItem value="front">Front of Class</SelectItem>
-                      <SelectItem value="middle">Middle of Class</SelectItem>
-                      <SelectItem value="back">Back of Class</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                
                 {!currentStudent.preferences.preferAlone && (
                   <>
                     <div className="space-y-2">
@@ -531,7 +1016,7 @@ export default function ClassroomSeatArranger() {
                                   }}
                                 />
                                 <span className="text-sm">{student.name}</span>
-                                {isMutual && <Badge variant="outline" className="text-xs bg-emerald-100 text-emerald-700 border-emerald-300 ml-auto">Mutual! 🪑🪑</Badge>}
+                                {isMutual && <Badge variant="outline" className="text-xs bg-emerald-100 text-emerald-700 border-emerald-300 ml-auto">Mutual!</Badge>}
                                 {friendWantsAlone && <Badge variant="outline" className="text-xs bg-purple-100 text-purple-700 border-purple-300 ml-auto">Wants alone</Badge>}
                               </label>
                             )
@@ -539,7 +1024,7 @@ export default function ClassroomSeatArranger() {
                         </div>
                       </ScrollArea>
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label className="flex items-center gap-2"><UserX className="h-4 w-4 text-red-500" /> Prefer NOT to sit with</Label>
                       <ScrollArea className="h-32 rounded-md border p-2">
@@ -590,16 +1075,15 @@ export default function ClassroomSeatArranger() {
           <CardDescription>Review preferences and run the auto-arrangement algorithm.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-4 rounded-lg bg-muted/50"><div className="text-2xl font-bold text-primary">{state.students.length}</div><div className="text-sm text-muted-foreground">Students</div></div>
             <div className="p-4 rounded-lg bg-muted/50"><div className="text-2xl font-bold text-primary">{state.seats.length}</div><div className="text-sm text-muted-foreground">Seats</div></div>
-            <div className="p-4 rounded-lg bg-muted/50"><div className="text-2xl font-bold text-primary">{state.students.filter(s => s.preferences.wantToSitWith.length > 0 || s.preferences.position !== 'any').length}</div><div className="text-sm text-muted-foreground">With Preferences</div></div>
             <div className="p-4 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200"><div className="text-2xl font-bold text-purple-600">{state.students.filter(s => s.preferences.preferAlone).length}</div><div className="text-sm text-muted-foreground">Want Alone</div></div>
           </div>
           
           <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800">
             <p className="text-sm text-emerald-800 dark:text-emerald-400">
-              💡 <strong>Important:</strong> Students with "want to sit with" preferences will ALWAYS be seated in double desks (side-by-side). Students who want to be alone get isolated single seats.
+              <strong>Important:</strong> Students with "want to sit with" preferences will always be seated in double desks (side-by-side). Students who want to be alone get isolated single seats.
             </p>
           </div>
           
@@ -617,16 +1101,7 @@ export default function ClassroomSeatArranger() {
   )
   
   const renderResult = () => {
-    const totalRows = Math.max(...state.seats.map(s => s.row), 0) + 1
-    
     const getStudentForSeat = (seatId: string) => state.students.find(s => s.assignedSeatId === seatId)
-    
-    const getSeatPosition = (seat: Seat): 'front' | 'middle' | 'back' => {
-      const third = totalRows / 3
-      if (seat.row < third) return 'front'
-      if (seat.row < third * 2) return 'middle'
-      return 'back'
-    }
     
     let assignedCount = 0
     let friendsTogether = 0
@@ -654,17 +1129,17 @@ export default function ClassroomSeatArranger() {
             <CardDescription>Click on a seated student to remove them, or click an unassigned student below to place them.</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="border rounded-lg p-4 bg-muted/30 overflow-x-auto">
-              <div className="text-center mb-4 text-sm text-muted-foreground font-medium">📝 FRONT OF CLASSROOM</div>
-              
-              <div className="flex flex-col gap-2 items-center min-w-max">
+            <div className="border rounded-lg p-6 bg-muted/30 overflow-x-auto">
+              <div className="text-center mb-6 text-sm text-muted-foreground font-medium">FRONT OF CLASSROOM</div>
+
+              <div className="flex flex-col gap-3 items-center min-w-max">
                 {seatGrid.map((row, rowIndex) => (
-                  <div key={rowIndex} className="flex gap-2">
+                  <div key={rowIndex} className="flex gap-3">
                     {row.map((seat, colIndex) => {
-                      if (!seat) return <div key={colIndex} className="w-20 h-16" />
-                      
+                      if (!seat) return <div key={colIndex} className="w-24 h-20" />
+
                       const student = getStudentForSeat(seat.id)
-                      
+
                       return (
                         <div
                           key={seat.id}
@@ -676,26 +1151,31 @@ export default function ClassroomSeatArranger() {
                               }))
                             }
                           }}
-                          className={`w-20 h-16 rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all duration-200 text-xs ${
-                            student 
+                          className={`w-24 h-20 rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all duration-200 ${
+                            student
                               ? student.preferences.preferAlone
-                                ? 'bg-purple-500 text-white shadow-md hover:shadow-lg hover:scale-105'
-                                : 'bg-primary text-primary-foreground shadow-md hover:shadow-lg hover:scale-105'
-                              : 'bg-card border border-dashed border-border hover:border-primary/50 hover:bg-muted/50'
-                          } ${seat.isDouble ? 'ring-2 ring-primary/30' : ''}`}
+                                ? 'bg-purple-500 text-white shadow-lg hover:shadow-xl hover:scale-105'
+                                : 'bg-primary text-primary-foreground shadow-lg hover:shadow-xl hover:scale-105'
+                              : 'bg-card border-2 border-dashed border-border hover:border-primary/50 hover:bg-muted/50'
+                          } ${seat.isDouble ? 'ring-2 ring-primary/40' : ''}`}
                         >
                           {student ? (
                             <>
-                              <div className="font-bold truncate px-1 w-full text-center flex items-center justify-center gap-1">
+                              <div className="font-bold truncate px-2 w-full text-center flex items-center justify-center gap-1 text-sm">
                                 {student.preferences.preferAlone && <UserCircle className="h-3 w-3" />}
                                 {student.name}
                               </div>
-                              <div className={`text-[10px] px-1.5 py-0.5 rounded-full mt-1 ${student.preferences.preferAlone ? 'bg-purple-300 text-purple-900' : positionColors[student.preferences.position]}`}>
-                                {student.preferences.preferAlone ? 'alone' : student.preferences.position}
-                              </div>
+                              {student.preferences.preferAlone && (
+                                <div className="text-[10px] px-2 py-0.5 rounded-full mt-1 bg-purple-300 text-purple-900">
+                                  alone
+                                </div>
+                              )}
+                              {seat.isDouble && (
+                                <div className="text-[9px] mt-0.5 opacity-75">double</div>
+                              )}
                             </>
                           ) : (
-                            <div className="text-muted-foreground">Empty</div>
+                            <div className="text-muted-foreground text-xs">Empty</div>
                           )}
                         </div>
                       )
@@ -705,18 +1185,21 @@ export default function ClassroomSeatArranger() {
               </div>
             </div>
             
-            <div className="mt-6 p-4 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800">
-              <h4 className="font-medium text-emerald-800 dark:text-emerald-400 mb-3">Arrangement Analysis</h4>
+            <div className="mt-6 p-5 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800">
+              <h4 className="font-semibold text-emerald-800 dark:text-emerald-400 mb-3 text-base">Arrangement Analysis</h4>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-                <div><span className="text-muted-foreground">Assigned:</span> <span className="font-medium">{assignedCount}/{state.students.length}</span></div>
-                <div><span className="text-muted-foreground">Friends Together:</span> <span className="font-medium text-emerald-600">{friendsTogether} pairs</span></div>
+                <div><span className="text-muted-foreground">Assigned:</span> <span className="font-semibold text-lg">{assignedCount}/{state.students.length}</span></div>
+                <div><span className="text-muted-foreground">Friends Together:</span> <span className="font-semibold text-emerald-600 text-lg">{friendsTogether} pairs</span></div>
+                <div><span className="text-muted-foreground">Empty Seats:</span> <span className="font-semibold text-lg">{state.seats.length - assignedCount}</span></div>
+                <div><span className="text-muted-foreground">Unassigned:</span> <span className="font-semibold text-amber-600 text-lg">{state.students.length - assignedCount}</span></div>
               </div>
             </div>
             
-            <div className="mt-4 flex flex-wrap gap-4 text-sm">
-              <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-primary" /> Seated</div>
-              <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-purple-500" /> Alone</div>
-              <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-card border border-dashed" /> Empty</div>
+            <div className="mt-6 flex flex-wrap gap-4 text-sm">
+              <div className="flex items-center gap-2"><div className="w-5 h-5 rounded bg-primary" /> Seated</div>
+              <div className="flex items-center gap-2"><div className="w-5 h-5 rounded bg-purple-500" /> Prefers Alone</div>
+              <div className="flex items-center gap-2"><div className="w-5 h-5 rounded bg-card border-2 border-dashed" /> Empty</div>
+              <div className="flex items-center gap-2"><div className="w-5 h-5 rounded bg-primary ring-2 ring-primary/40" /> Double Desk</div>
             </div>
             
             {state.students.some(s => !s.assignedSeatId) && (
@@ -768,6 +1251,7 @@ export default function ClassroomSeatArranger() {
         </div>
         
         {renderProgressBar()}
+        {renderWorkspaceControls()}
         
         <div className="min-h-[400px]">
           {state.step === 'setup' && renderSetup()}

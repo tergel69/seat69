@@ -10,7 +10,6 @@ export interface Student {
   id: number
   name: string
   preferences: {
-    position: 'front' | 'middle' | 'back' | 'any'
     wantToSitWith: number[]
     notWantToSitWith: number[]
     preferAlone: boolean
@@ -46,7 +45,6 @@ export const generateDefaultStudents = (numStudents: number): Student[] => {
     id: i + 1,
     name: `Student ${i + 1}`,
     preferences: {
-      position: 'any' as const,
       wantToSitWith: [],
       notWantToSitWith: [],
       preferAlone: false,
@@ -74,82 +72,70 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
   const arrangedStudents: Student[] = students.map((s) => ({ ...s, assignedSeatId: undefined }))
   const availableSeats = new Set(seats.map((s) => s.id))
 
-  const totalRows = Math.max(...seats.map((s) => s.row), 0) + 1
-
-  const getSeatPosition = (seat: Seat): 'front' | 'middle' | 'back' => {
-    const third = Math.ceil(totalRows / 3)
-    if (seat.row < third) return 'front'
-    if (seat.row < third * 2) return 'middle'
-    return 'back'
-  }
-
   const getSeatById = (id: string) => seats.find((s) => s.id === id)
 
   const getAssignedStudent = (seatId: string) =>
     arrangedStudents.find((s) => s.assignedSeatId === seatId)
 
-  const isPositionCompatible = (student: Student, seat: Seat): boolean => {
-    if (student.preferences.position === 'any') return true
-    return getSeatPosition(seat) === student.preferences.position
+  // Helper: check if student A should NOT be paired with student B based on B's preferences
+  const isPairingBlockedByFriend = (studentId: number, friendId: number): boolean => {
+    const friend = arrangedStudents.find((s) => s.id === friendId)
+    if (!friend) return true
+
+    // Friend prefers alone → blocks pairing
+    if (friend.preferences.preferAlone) return true
+
+    // Friend has student in "not want" → blocks pairing
+    if (friend.preferences.notWantToSitWith.includes(studentId)) return true
+
+    return false
   }
 
-  const getSideBySideSeats = (seat: Seat): string[] => {
-    return getAdjacentSeats(seat, seats)
+  // Helper: check if two students have a valid mutual want (neither blocks the other)
+  const isValidMutualPair = (studentId: number, friendId: number): boolean => {
+    const student = arrangedStudents.find((s) => s.id === studentId)
+    const friend = arrangedStudents.find((s) => s.id === friendId)
+    if (!student || !friend) return false
+
+    // Both must want each other
+    if (!student.preferences.wantToSitWith.includes(friendId)) return false
+    if (!friend.preferences.wantToSitWith.includes(studentId)) return false
+
+    // Neither should block the other
+    if (isPairingBlockedByFriend(studentId, friendId)) return false
+    if (isPairingBlockedByFriend(friendId, studentId)) return false
+
+    return true
   }
 
-  const findAvailableSideBySidePairs = (): [Seat, Seat][] => {
-    const pairs: [Seat, Seat][] = []
-    const seen = new Set<string>()
-
-    for (const seatId of availableSeats) {
-      const seat = getSeatById(seatId)
-      if (!seat || seat.isDouble) continue
-
-      const sideIds = getSideBySideSeats(seat)
-      for (const sideId of sideIds) {
-        if (!availableSeats.has(sideId)) continue
-
-        const sideSeat = getSeatById(sideId)
-        if (!sideSeat || sideSeat.isDouble) continue
-
-        const pairKey = [seatId, sideId].sort().join('-')
-        if (seen.has(pairKey)) continue
-        seen.add(pairKey)
-
-        pairs.push([seat, sideSeat])
-      }
-    }
-
-    return pairs
-  }
-
-  const preferAloneStudents = arrangedStudents.filter((s) => s.preferences.preferAlone)
-
-  for (const student of preferAloneStudents) {
+  const findBestSeat = (student: Student, excludeSeats: Set<string> = new Set()): Seat | null => {
     let bestSeat: Seat | null = null
     let bestScore = -Infinity
 
     const availableSeatList = Array.from(availableSeats)
+      .filter((id) => !excludeSeats.has(id))
       .map((id) => getSeatById(id))
       .filter(Boolean) as Seat[]
 
     for (const seat of availableSeatList) {
-      if (seat.isDouble) continue
-
       let score = 0
-
-      if (isPositionCompatible(student, seat)) score += 50
 
       const neighbors = getNeighborSeats(seat, seats)
       const occupiedNeighbors = neighbors.filter((nId) => getAssignedStudent(nId))
-      score -= occupiedNeighbors.length * 20
+      score -= occupiedNeighbors.length * 10
 
-      if (neighbors.length === 0) score += 30
+      if (student.preferences.preferAlone) {
+        score -= occupiedNeighbors.length * 30
+        if (neighbors.length === 0) score += 40
+      }
 
       for (const neighborId of neighbors) {
         const neighborStudent = getAssignedStudent(neighborId)
         if (neighborStudent && student.preferences.notWantToSitWith.includes(neighborStudent.id)) {
-          score -= 100
+          score -= 150
+        }
+        if (neighborStudent && student.preferences.wantToSitWith.includes(neighborStudent.id)) {
+          score += 80
         }
       }
 
@@ -159,12 +145,25 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
       }
     }
 
+    return bestScore > -Infinity ? bestSeat : null
+  }
+
+  const assignStudentToSeat = (student: Student, seat: Seat): void => {
+    student.assignedSeatId = seat.id
+    availableSeats.delete(seat.id)
+  }
+
+  // Pass 1: Place prefer-alone students in isolated seats
+  const preferAloneStudents = arrangedStudents.filter((s) => s.preferences.preferAlone)
+
+  for (const student of preferAloneStudents) {
+    const bestSeat = findBestSeat(student)
     if (bestSeat) {
-      student.assignedSeatId = bestSeat.id
-      availableSeats.delete(bestSeat.id)
+      assignStudentToSeat(student, bestSeat)
     }
   }
 
+  // Pass 2: Place valid mutual pairs together
   const processedPairs = new Set<string>()
 
   for (const student of arrangedStudents) {
@@ -176,34 +175,47 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
       const pairKey = [Math.min(student.id, friendId), Math.max(student.id, friendId)].join('-')
       if (processedPairs.has(pairKey)) continue
 
+      // Check if this is a valid mutual pair
+      if (!isValidMutualPair(student.id, friendId)) continue
+
       const friend = arrangedStudents.find((s) => s.id === friendId)
-      if (!friend || friend.assignedSeatId || friend.preferences.preferAlone) continue
+      if (!friend || friend.assignedSeatId) continue
 
-      const isMutual = friend.preferences.wantToSitWith.includes(student.id)
+      // Find all available adjacent seat pairs
+      let bestPair: [Seat, Seat] | null = null
+      let bestScore = -Infinity
 
-      if (isMutual) {
-        const sideBySidePairs = findAvailableSideBySidePairs()
+      for (const seatId of availableSeats) {
+        const seat1 = getSeatById(seatId)
+        if (!seat1) continue
 
-        let bestPair: [Seat, Seat] | null = null
-        let bestScore = -Infinity
+        const adjacentSeats = getAdjacentSeats(seat1, seats)
+        for (const adjacentId of adjacentSeats) {
+          if (!availableSeats.has(adjacentId)) continue
 
-        for (const [seat1, seat2] of sideBySidePairs) {
+          const seat2 = getSeatById(adjacentId)
+          if (!seat2) continue
+
+          if (seat1.isDouble && seat1.pairedWith && seat1.pairedWith !== seat2.id) continue
+          if (seat2.isDouble && seat2.pairedWith && seat2.pairedWith !== seat1.id) continue
+
+          const seenKey = [seat1.id, seat2.id].sort().join('-')
+          if (processedPairs.has(`seats-${seenKey}`)) continue
+
           let score = 200
 
-          if (isPositionCompatible(student, seat1)) score += 40
-          if (isPositionCompatible(friend, seat2)) score += 40
+          // Prefer double desks for paired students
+          if (seat1.isDouble || seat2.isDouble) score += 30
 
           const seat1Neighbors = getNeighborSeats(seat1, seats).filter((id) => id !== seat2.id)
           const seat2Neighbors = getNeighborSeats(seat2, seats).filter((id) => id !== seat1.id)
 
-          for (const nId of seat1Neighbors) {
+          for (const nId of [...seat1Neighbors, ...seat2Neighbors]) {
             const nStudent = getAssignedStudent(nId)
-            if (nStudent && student.preferences.notWantToSitWith.includes(nStudent.id)) score -= 100
-          }
-
-          for (const nId of seat2Neighbors) {
-            const nStudent = getAssignedStudent(nId)
-            if (nStudent && friend.preferences.notWantToSitWith.includes(nStudent.id)) score -= 100
+            if (nStudent) {
+              if (student.preferences.notWantToSitWith.includes(nStudent.id)) score -= 150
+              if (friend.preferences.notWantToSitWith.includes(nStudent.id)) score -= 150
+            }
           }
 
           if (score > bestScore) {
@@ -211,19 +223,19 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
             bestPair = [seat1, seat2]
           }
         }
+      }
 
-        if (bestPair) {
-          student.assignedSeatId = bestPair[0].id
-          friend.assignedSeatId = bestPair[1].id
-          availableSeats.delete(bestPair[0].id)
-          availableSeats.delete(bestPair[1].id)
-          processedPairs.add(pairKey)
-          break
-        }
+      if (bestPair) {
+        assignStudentToSeat(student, bestPair[0])
+        assignStudentToSeat(friend, bestPair[1])
+        processedPairs.add(pairKey)
+        processedPairs.add(`seats-${[bestPair[0].id, bestPair[1].id].sort().join('-')}`)
+        break
       }
     }
   }
 
+  // Pass 3: Handle one-way preferences - place student next to already-seated friend (if friend allows)
   const studentsWithOneWayPrefs = arrangedStudents.filter(
     (s) => !s.assignedSeatId && s.preferences.wantToSitWith.length > 0 && !s.preferences.preferAlone,
   )
@@ -232,13 +244,17 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
     if (student.assignedSeatId) continue
 
     for (const friendId of student.preferences.wantToSitWith) {
+      // Skip if the friend blocks this pairing
+      if (isPairingBlockedByFriend(student.id, friendId)) continue
+
       const friend = arrangedStudents.find((s) => s.id === friendId && s.assignedSeatId)
       if (!friend || !friend.assignedSeatId) continue
 
       const friendSeat = getSeatById(friend.assignedSeatId)
       if (!friendSeat) continue
 
-      const sideSeats = getSideBySideSeats(friendSeat)
+      // Find adjacent available seat next to friend
+      const sideSeats = getAdjacentSeats(friendSeat, seats)
       let bestSeat: Seat | null = null
       let bestScore = -Infinity
 
@@ -246,16 +262,14 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
         if (!availableSeats.has(sideId)) continue
 
         const sideSeat = getSeatById(sideId)
-        if (!sideSeat || sideSeat.isDouble) continue
+        if (!sideSeat) continue
 
         let score = 150
-
-        if (isPositionCompatible(student, sideSeat)) score += 40
 
         const neighbors = getNeighborSeats(sideSeat, seats).filter((id) => id !== friendSeat.id)
         for (const nId of neighbors) {
           const nStudent = getAssignedStudent(nId)
-          if (nStudent && student.preferences.notWantToSitWith.includes(nStudent.id)) score -= 100
+          if (nStudent && student.preferences.notWantToSitWith.includes(nStudent.id)) score -= 150
         }
 
         if (score > bestScore) {
@@ -265,37 +279,47 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
       }
 
       if (bestSeat) {
-        student.assignedSeatId = bestSeat.id
-        availableSeats.delete(bestSeat.id)
+        assignStudentToSeat(student, bestSeat)
         break
       }
     }
 
+    // If still unassigned, try to pair with another unassigned student (if no blocking)
     if (!student.assignedSeatId) {
-      const sideBySidePairs = findAvailableSideBySidePairs()
+      const unassignedNoPref = arrangedStudents.find(
+        (s) =>
+          !s.assignedSeatId &&
+          s.id !== student.id &&
+          !s.preferences.preferAlone &&
+          s.preferences.wantToSitWith.length === 0 &&
+          !s.preferences.notWantToSitWith.includes(student.id) &&
+          !student.preferences.notWantToSitWith.includes(s.id),
+      )
 
-      if (sideBySidePairs.length > 0) {
-        const unassignedNoPref = arrangedStudents.find(
-          (s) =>
-            !s.assignedSeatId &&
-            s.id !== student.id &&
-            !s.preferences.preferAlone &&
-            s.preferences.wantToSitWith.length === 0,
-        )
+      if (unassignedNoPref) {
+        let bestPair: [Seat, Seat] | null = null
+        let bestScore = -Infinity
 
-        if (unassignedNoPref) {
-          let bestPair: [Seat, Seat] | null = null
-          let bestScore = -Infinity
+        for (const seatId of availableSeats) {
+          const seat1 = getSeatById(seatId)
+          if (!seat1) continue
 
-          for (const [seat1, seat2] of sideBySidePairs) {
+          const adjacentSeats = getAdjacentSeats(seat1, seats)
+          for (const adjacentId of adjacentSeats) {
+            if (!availableSeats.has(adjacentId)) continue
+
+            const seat2 = getSeatById(adjacentId)
+            if (!seat2) continue
+
+            if (seat1.isDouble && seat1.pairedWith && seat1.pairedWith !== seat2.id) continue
+            if (seat2.isDouble && seat2.pairedWith && seat2.pairedWith !== seat1.id) continue
+
             let score = 100
-
-            if (isPositionCompatible(student, seat1)) score += 40
 
             const seat1Neighbors = getNeighborSeats(seat1, seats).filter((id) => id !== seat2.id)
             for (const nId of seat1Neighbors) {
               const nStudent = getAssignedStudent(nId)
-              if (nStudent && student.preferences.notWantToSitWith.includes(nStudent.id)) score -= 100
+              if (nStudent && student.preferences.notWantToSitWith.includes(nStudent.id)) score -= 150
             }
 
             if (score > bestScore) {
@@ -303,120 +327,117 @@ export const arrangeSeats = (students: Student[], seats: Seat[]): Student[] => {
               bestPair = [seat1, seat2]
             }
           }
+        }
 
-          if (bestPair) {
-            student.assignedSeatId = bestPair[0].id
-            unassignedNoPref.assignedSeatId = bestPair[1].id
-            availableSeats.delete(bestPair[0].id)
-            availableSeats.delete(bestPair[1].id)
-          }
+        if (bestPair) {
+          assignStudentToSeat(student, bestPair[0])
+          assignStudentToSeat(unassignedNoPref, bestPair[1])
         }
       }
     }
   }
 
+  // Pass 4: Assign remaining students — try to pair those who still want to sit with someone (if valid)
   const remainingUnassigned = arrangedStudents.filter(
     (s) => !s.assignedSeatId && !s.preferences.preferAlone,
   )
 
+  // Sort: students WITHOUT wants first (they're easier to place), then those with wants
   remainingUnassigned.sort((a, b) => {
-    const aHasPref = a.preferences.position !== 'any' ? 1 : 0
-    const bHasPref = b.preferences.position !== 'any' ? 1 : 0
-    return bHasPref - aHasPref
+    const aWantsSomeone = a.preferences.wantToSitWith.length > 0 ? 1 : 0
+    const bWantsSomeone = b.preferences.wantToSitWith.length > 0 ? 1 : 0
+    return aWantsSomeone - bWantsSomeone
   })
 
-  for (let i = 0; i < remainingUnassigned.length; i += 2) {
-    const student1 = remainingUnassigned[i]
-    const student2 = remainingUnassigned[i + 1]
+  // Try to pair remaining students who have mutual wants (and aren't blocked)
+  const pairedInThisPass = new Set<number>()
 
-    if (student1.assignedSeatId) continue
+  for (let i = 0; i < remainingUnassigned.length; i++) {
+    const student = remainingUnassigned[i]
+    if (student.assignedSeatId || pairedInThisPass.has(student.id)) continue
 
-    // If there's no student2, just assign a single seat
-    if (!student2) {
-      const availableSeatList = Array.from(availableSeats)
-        .map((id) => getSeatById(id))
-        .filter(Boolean) as Seat[]
-
-      let bestSeat: Seat | null = null
-      let bestScore = -Infinity
-
-      for (const seat of availableSeatList) {
-        if (seat.isDouble) continue
-
-        let score = 50
-        if (isPositionCompatible(student1, seat)) score += 30
-
-        if (score > bestScore) {
-          bestScore = score
-          bestSeat = seat
+    // Try to find a mutual partner first (only if student has wants)
+    if (student.preferences.wantToSitWith.length > 0) {
+      let partner: Student | null = null
+      for (const friendId of student.preferences.wantToSitWith) {
+        const potentialPartner = remainingUnassigned.find((s) => s.id === friendId && !s.assignedSeatId && !pairedInThisPass.has(s.id))
+        if (potentialPartner && isValidMutualPair(student.id, friendId)) {
+          partner = potentialPartner
+          break
         }
       }
 
-      if (bestSeat) {
-        student1.assignedSeatId = bestSeat.id
-        availableSeats.delete(bestSeat.id)
+      if (partner) {
+        // Find adjacent seats for the pair
+        let bestPair: [Seat, Seat] | null = null
+        let bestScore = -Infinity
+
+        for (const seatId of availableSeats) {
+          const seat1 = getSeatById(seatId)
+          if (!seat1) continue
+
+          const adjacentSeats = getAdjacentSeats(seat1, seats)
+          for (const adjacentId of adjacentSeats) {
+            if (!availableSeats.has(adjacentId)) continue
+
+            const seat2 = getSeatById(adjacentId)
+            if (!seat2) continue
+
+            if (seat1.isDouble && seat1.pairedWith && seat1.pairedWith !== seat2.id) continue
+            if (seat2.isDouble && seat2.pairedWith && seat2.pairedWith !== seat1.id) continue
+
+            let score = 50
+
+            if (score > bestScore) {
+              bestScore = score
+              bestPair = [seat1, seat2]
+            }
+          }
+        }
+
+        if (bestPair) {
+          assignStudentToSeat(student, bestPair[0])
+          assignStudentToSeat(partner, bestPair[1])
+          pairedInThisPass.add(student.id)
+          pairedInThisPass.add(partner.id)
+          continue
+        }
       }
-      continue
     }
 
-    const sideBySidePairs = findAvailableSideBySidePairs()
+    // If no partner found (or student has no wants), assign single seat
+    // BUT skip students who have unfulfilled mutual wants — they should stay unassigned
+    if (!student.assignedSeatId && !pairedInThisPass.has(student.id)) {
+      const hasUnfulfilledMutualWant = student.preferences.wantToSitWith.some((friendId) => {
+        const friend = arrangedStudents.find((s) => s.id === friendId)
+        return friend && !friend.assignedSeatId && friend.preferences.wantToSitWith.includes(student.id)
+      })
 
-    if (sideBySidePairs.length > 0) {
-      let bestPair: [Seat, Seat] | null = null
-      let bestScore = -Infinity
-
-      for (const [seat1, seat2] of sideBySidePairs) {
-        let score = 50
-
-        if (isPositionCompatible(student1, seat1)) score += 30
-        if (isPositionCompatible(student2, seat2)) score += 30
-
-        if (score > bestScore) {
-          bestScore = score
-          bestPair = [seat1, seat2]
-        }
-      }
-
-      if (bestPair) {
-        student1.assignedSeatId = bestPair[0].id
-        availableSeats.delete(bestPair[0].id)
-
-        if (!student2.assignedSeatId) {
-          student2.assignedSeatId = bestPair[1].id
-          availableSeats.delete(bestPair[1].id)
+      // Don't assign solo if they're waiting for a mutual partner
+      if (!hasUnfulfilledMutualWant) {
+        const bestSeat = findBestSeat(student)
+        if (bestSeat) {
+          assignStudentToSeat(student, bestSeat)
         }
       }
     }
   }
 
+  // Pass 5: Final pass — assign any still-unassigned students who don't require pairing
   for (const student of arrangedStudents) {
-    const requiresPairing =
-      student.preferences.wantToSitWith.length > 0 && !student.preferences.preferAlone
+    if (!student.assignedSeatId && availableSeats.size > 0) {
+      // Check if student has unfulfilled mutual wants (don't force solo assignment)
+      const hasUnfulfilledMutualWant = student.preferences.wantToSitWith.some((friendId) => {
+        const friend = arrangedStudents.find((s) => s.id === friendId)
+        return friend && !friend.assignedSeatId && friend.preferences.wantToSitWith.includes(student.id)
+      })
 
-    if (!student.assignedSeatId && availableSeats.size > 0 && !requiresPairing) {
-      // Filter seats by position preference if student has one
-      const availableSeatList = Array.from(availableSeats)
-        .map((id) => getSeatById(id))
-        .filter(Boolean) as Seat[]
-
-      let bestSeat: Seat | null = null
-      let bestScore = -Infinity
-
-      for (const seat of availableSeatList) {
-        if (seat.isDouble) continue
-
-        let score = 0
-        if (isPositionCompatible(student, seat)) score += 50
-
-        if (score > bestScore) {
-          bestScore = score
-          bestSeat = seat
+      // Only assign if they don't have an unfulfilled mutual want
+      if (!hasUnfulfilledMutualWant) {
+        const bestSeat = findBestSeat(student)
+        if (bestSeat) {
+          assignStudentToSeat(student, bestSeat)
         }
-      }
-
-      if (bestSeat) {
-        student.assignedSeatId = bestSeat.id
-        availableSeats.delete(bestSeat.id)
       }
     }
   }
